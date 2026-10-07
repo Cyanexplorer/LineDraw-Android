@@ -42,12 +42,44 @@ class ParserTest {
         val rows=DrawParser().parse(source)
         assertEquals(1,rows.size);assertEquals("draw-a",rows.single().sourceId);assertEquals(0,rows.single().ordinal)
     }
-    @Test fun actionableRowsMissingIdentityStillRejectWholePage() {
-        val badRows=listOf("data-draw-id=\"bad\"", "data-draw-href=\"https://lin.ee/bad\"", "onclick=\"openDraw()\"", "role=\"link\"")
+    @Test fun actionableRowsWithoutAnyLinkStillRejectWholePage() {
+        // 只有 ID、或只有操作標記卻沒有連結的列仍視為損壞，避免做出打不開的抽選列。
+        val badRows=listOf("data-draw-id=\"bad\"", "onclick=\"openDraw()\"", "role=\"link\"")
         badRows.forEach { marker ->
             val bad="<div class=\"draw-item\" $marker><div class=\"draw-product\">抽選</div></div>"
             assertThrows(IllegalArgumentException::class.java) { DrawParser().parse(html().replace("</div></div>","</div>$bad</div>")) }
         }
+    }
+    @Test fun rowWithLinkButNoDeclaredIdKeepsWholePageUsable() {
+        // 2026/10/08 原站「來玩聚-楠梓家樂福」只有 data-draw-href，沒有 data-draw-id。
+        val onlyHref="""<div class="draw-item draw-item-clickable" data-draw-href="https://lin.ee/noId"><div class="draw-product">CX-08 隨機強化組</div></div>"""
+        val page=html(rows="""<div class="draw-item" data-draw-id="draw-a" data-draw-href="https://lin.ee/hasId"><div class="draw-product">UX-03 魔導神杖</div></div>$onlyHref""")
+        val rows=DrawParser().parse(page)
+        assertEquals(listOf("draw-a"),rows.map{it.sourceId}.filterNot{it.startsWith("derived-")})
+        val derived=rows.single{it.sourceId.startsWith("derived-")}
+        assertEquals("https://lin.ee/noId",derived.url);assertEquals("CX-08 隨機強化組",derived.product)
+        // 同一份頁面重複解析必須得到相同識別碼，本機紀錄才能延續。
+        assertEquals(rows.map{it.rowKey},DrawParser().parse(page).map{it.rowKey})
+    }
+    @Test fun derivedIdentityStaysUniqueForRepeatedAndIdenticalRows() {
+        val sameLink=(0..1).joinToString(""){i->"""<div class="draw-item" data-draw-href="https://lin.ee/shared"><div class="draw-product">商品$i</div></div>"""}
+        val identical="""<div class="draw-item" data-draw-href="https://lin.ee/dup"><div class="draw-product">同商品</div></div>""".repeat(2)
+        val rows=DrawParser().parse(html(rows=sameLink+identical))
+        assertEquals(4,rows.size);assertEquals(4,rows.map{it.rowKey}.distinct().size)
+        assertEquals(2,rows.count{it.url=="https://lin.ee/dup"});assertEquals(1,rows.count{it.sourceId.contains('#')})
+    }
+    @Test fun legacyLinkAttributesAreStillAccepted() {
+        // 原站資料檔曾輸出 data-draw-url，列內 <a href> 也在原站 JS 的備援路徑中。
+        val rows=DrawParser().parse(html(rows="""<div class="draw-item" data-draw-url="https://lin.ee/legacy"><div class="draw-product">UX-03 魔導神杖</div></div><div class="draw-item draw-item-clickable"><a href="https://lin.ee/anchor">連結</a><div class="draw-product">BX-09 通行證</div></div>"""))
+        assertEquals(listOf("https://lin.ee/legacy","https://lin.ee/anchor"),rows.map{it.url})
+    }
+    @Test fun liveHrefOnlyStoreNoLongerBreaksTheWholeCatalog() {
+        val rows=DrawParser().parse(javaClass.getResource("/funbox-20261008-href-only-rows.html")!!.readText())
+        assertEquals(26,rows.size);assertEquals(2,rows.map{it.store}.distinct().size)
+        assertEquals(9,rows.count{it.store=="來玩聚-楠梓家樂福"})
+        assertTrue(rows.all{LinkPolicy.allowed(it.url)})
+        assertTrue(rows.filter{it.store=="來玩聚-楠梓家樂福"}.all{it.sourceId.startsWith("derived-")})
+        assertEquals(17,rows.count{!it.sourceId.startsWith("derived-")})
     }
     @Test fun latestSourceWithSalesOnlyProductParsesAllDrawLinks() {
         val rows=DrawParser().parse(javaClass.getResource("/funbox-20261002.html")!!.readText())
